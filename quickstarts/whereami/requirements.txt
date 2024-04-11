@@ -1,6 +1,6 @@
 flask
 requests
-emoji==2.10.1
+emoji==2.11.0
 flask-cors
 grpcio
 grpcio-reflection
@@ -15,3 +15,4 @@ opentelemetry-exporter-gcp-trace
 opentelemetry-instrumentation-flask
 opentelemetry-instrumentation-requests
 six
+gunicorn

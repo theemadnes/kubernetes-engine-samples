@@ -47,6 +47,7 @@ from opentelemetry.propagators.cloud_trace_propagator import (
 )
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
+import gunicorn.app.base
 
 # set up logging
 dictConfig({
@@ -64,6 +65,23 @@ dictConfig({
         'handlers': ['wsgi']
     }
 })
+
+# set up class for gunicorn
+class StandaloneApplication(gunicorn.app.base.BaseApplication):
+
+    def __init__(self, app, options=None):
+        self.options = options or {}
+        self.application = app
+        super().__init__()
+
+    def load_config(self):
+        config = {key: value for key, value in self.options.items()
+                  if key in self.cfg.settings and value is not None}
+        for key, value in config.items():
+            self.cfg.set(key.lower(), value)
+
+    def load(self):
+        return self.application
 
 # get host IP
 host_ip = os.getenv("HOST", "0.0.0.0") # in absence of env var, default to 0.0.0.0 (IPv4)
@@ -203,8 +221,11 @@ if __name__ == '__main__':
         grpc_serve()
 
     else:
-        app.run(
-            host=host_ip.strip('[]'), # stripping out the brackets if present
-            port=int(os.environ.get('PORT', 8080)),
-            debug=True,
-            threaded=True)
+
+        # else, run flask app using gunicorn
+        options = {
+        'bind': host_ip.strip('[]') + ":" + str(os.environ.get('PORT', 8080)),
+        'workers': (multiprocessing.cpu_count() * 2) + 1,
+        }
+        
+        StandaloneApplication(app, options).run()
