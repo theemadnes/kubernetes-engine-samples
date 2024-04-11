@@ -221,7 +221,6 @@ if __name__ == '__main__':
         grpc_serve()
 
     else:
-
         # else, run flask app using gunicorn
         options = {
         'bind': host_ip.strip('[]') + ":" + str(os.environ.get('PORT', 8080)),
