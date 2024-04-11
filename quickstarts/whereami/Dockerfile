@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   wget && \
   apt-get clean && \
   rm -rf /var/lib/apt/lists/* && \
-  wget -O /bin/curl https://github.com/moparisthebest/static-curl/releases/download/v8.2.1/curl-amd64 && \ 
+  wget -O /bin/curl https://github.com/moparisthebest/static-curl/releases/download/v8.7.1/curl-amd64 && \ 
   chmod +x /bin/curl
 COPY ./requirements.txt /app/requirements.txt
 
