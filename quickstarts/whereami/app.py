@@ -32,6 +32,7 @@ import whereami_pb2
 import whereami_pb2_grpc
 # Prometheus export setup
 from prometheus_flask_exporter import PrometheusMetrics
+from prometheus_flask_exporter.multiprocess import GunicornPrometheusMetrics
 from py_grpc_prometheus.prometheus_server_interceptor import PromServerInterceptor
 from prometheus_client import start_http_server
 # OpenTelemetry setup
@@ -65,6 +66,10 @@ dictConfig({
         'handlers': ['wsgi']
     }
 })
+
+# set tmp directory for prom metrics
+os.environ["PROMETHEUS_MULTIPROC_DIR"] = "/tmp/"
+
 
 # set up class for gunicorn
 class StandaloneApplication(gunicorn.app.base.BaseApplication):
@@ -131,6 +136,7 @@ RequestsInstrumentor().instrument()  # enable tracing for Requests
 app.config['JSON_AS_ASCII'] = False  # otherwise our emojis get hosed
 CORS(app)  # enable CORS
 metrics = PrometheusMetrics(app)  # enable Prom metrics
+metrics = GunicornPrometheusMetrics(app)
 
 # gRPC setup
 grpc_serving_port = int(os.environ.get('PORT', 9090)) # configurable via `PORT` but default to 9090
@@ -226,5 +232,7 @@ if __name__ == '__main__':
         'bind': host_ip.strip('[]') + ":" + str(os.environ.get('PORT', 8080)),
         'workers': (multiprocessing.cpu_count() * 2) + 1,
         }
+        GunicornPrometheusMetrics.start_http_server_when_ready(8000)
+
         
         StandaloneApplication(app, options).run()
