@@ -20,6 +20,4 @@ COPY . /app
 RUN addgroup --system appuser && adduser --system appuser --ingroup appuser
 USER appuser
 
-ENTRYPOINT [ "python" ]
-
-CMD [ "app.py" ]
+ENTRYPOINT [ "./launch.sh" ]
