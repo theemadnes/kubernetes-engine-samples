@@ -16,3 +16,5 @@ opentelemetry-instrumentation-flask
 opentelemetry-instrumentation-requests
 six
 gunicorn
+python-json-logger
+json-logging-py
