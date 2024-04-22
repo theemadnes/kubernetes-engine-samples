@@ -32,10 +32,10 @@ else
     if [ -z "$PORT" ]
     then
         echo "\$PORT is NULL - setting to default of 8080"
-        gunicorn -w $GUNICORN_THREADS -b $HOST:8080 app:app
+        gunicorn -w $GUNICORN_THREADS -b $HOST:8080 app:app --access-logfile '-' --log-config-json log_config.json
     else
         echo "\$CORE_COUNT is NOT NULL"
-        gunicorn -w $GUNICORN_THREADS -b $HOST:${PORT} app:app
+        gunicorn -w $GUNICORN_THREADS -b $HOST:${PORT} app:app --access-logfile '-' --log-config-json log_config.json
     fi
 fi
 

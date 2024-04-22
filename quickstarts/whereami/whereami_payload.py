@@ -4,10 +4,11 @@ import os
 from datetime import datetime
 import emoji
 import logging
-from logging.config import dictConfig
+from pythonjsonlogger import jsonlogger
+#from logging.config import dictConfig
 import requests
 from requests.adapters import HTTPAdapter
-import urllib3
+#import urllib3
 from urllib3 import Retry
 # gRPC stuff
 import grpc
@@ -19,8 +20,7 @@ METADATA_URL = 'http://metadata.google.internal/computeMetadata/v1/'
 METADATA_HEADERS = {'Metadata-Flavor': 'Google'}
 GRPC_SECURE_PORTS = ['443', '8443'] # when using gRPC, this list is checked when determining to use a secure or insecure channel
 
-# set up logging
-dictConfig({
+'''dictConfig({
     'version': 1,
     'formatters': {'default': {
         'format': '[%(asctime)s] %(levelname)s in %(module)s: %(message)s',
@@ -34,7 +34,15 @@ dictConfig({
         'level': 'INFO',
         'handlers': ['wsgi']
     }
-})
+})'''
+
+# set up structured logging
+logger = logging.getLogger()
+
+logHandler = logging.StreamHandler()
+formatter = jsonlogger.JsonFormatter()
+logHandler.setFormatter(formatter)
+logger.addHandler(logHandler)
 
 # set up emoji list
 emoji_list = list(emoji.EMOJI_DATA.keys())

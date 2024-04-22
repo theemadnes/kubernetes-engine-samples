@@ -14,7 +14,8 @@
 
 from flask import Flask, request, Response, jsonify
 import logging
-from logging.config import dictConfig
+#from logging.config import dictConfig
+from pythonjsonlogger import jsonlogger
 import sys
 import os
 from flask_cors import CORS
@@ -49,7 +50,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
 
 # set up logging
-dictConfig({
+'''dictConfig({
     'version': 1,
     'formatters': {'default': {
         'format': '[%(asctime)s] %(levelname)s in %(module)s: %(message)s',
@@ -63,7 +64,14 @@ dictConfig({
         'level': 'INFO',
         'handlers': ['wsgi']
     }
-})
+})'''
+# set up structured logging
+logger = logging.getLogger()
+
+logHandler = logging.StreamHandler()
+formatter = jsonlogger.JsonFormatter()
+logHandler.setFormatter(formatter)
+logger.addHandler(logHandler)
 
 # get host IP
 host_ip = os.getenv("HOST", "0.0.0.0") # in absence of env var, default to 0.0.0.0 (IPv4)
@@ -104,8 +112,8 @@ else:
 
 # flask setup
 app = Flask(__name__)
-handler = logging.StreamHandler(sys.stdout)
-app.logger.addHandler(handler)
+#handler = logging.StreamHandler(sys.stdout)
+#app.logger.addHandler(handler)
 #app.logger.propagate = True
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 FlaskInstrumentor().instrument_app(app)
@@ -114,13 +122,18 @@ app.config['JSON_AS_ASCII'] = False  # otherwise our emojis get hosed
 CORS(app)  # enable CORS
 metrics = PrometheusMetrics(app)  # enable Prom metrics
 
+'''# setting up Gunicorn logging
+if __name__ != '__main__':
+    gunicorn_logger = logging.getLogger('gunicorn.error')
+    app.logger.handlers = gunicorn_logger.handlers
+    app.logger.setLevel(gunicorn_logger.level)'''
+
 # gRPC setup
 grpc_serving_port = int(os.environ.get('PORT', 9090)) # configurable via `PORT` but default to 9090
 grpc_metrics_port = 8000  # prometheus /metrics
 
 # define Whereami object
 whereami_payload = whereami_payload.WhereamiPayload()
-
 
 # create gRPC class
 class WhereamigRPC(whereami_pb2_grpc.WhereamiServicer):
