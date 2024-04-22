@@ -28,5 +28,5 @@ host_ip = os.getenv("HOST", "0.0.0.0")
 host=host_ip.strip('[]') # stripping out the brackets if present
 port=os.environ.get('PORT', 8080)
 
-bind = host + ":" + port
+bind = host + ":" + str(port)
 workers = multiprocessing.cpu_count() * 2 + 1
