@@ -1,7 +1,7 @@
 #!/bin/sh
 
 echo "Checking if HTTP or gRPC mode"
-if [[ $GRPC_ENABLED == "True" ]]
+if [ -n "${GRPC_ENABLED}" ] && [ "${GRPC_ENABLED}" == "True" ]
 then
     echo "gRPC mode enabled"
     python app.py
