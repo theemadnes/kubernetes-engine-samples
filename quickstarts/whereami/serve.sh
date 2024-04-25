@@ -7,5 +7,5 @@ then
     python app.py
 else
     echo "Flask/HTTP mode enabled"
-    gunicorn --log-config gunicorn_logging.conf --config gunicorn.conf.py app:app
+    gunicorn --config gunicorn.conf.py app:app --log-config gunicorn_logging.conf 
 fi

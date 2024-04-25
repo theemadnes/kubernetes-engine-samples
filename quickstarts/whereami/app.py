@@ -69,8 +69,8 @@ from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
 logger = logging.getLogger()
 
 logHandler = logging.StreamHandler()
-formatter = jsonlogger.JsonFormatter()
-logHandler.setFormatter(formatter)
+#formatter = jsonlogger.JsonFormatter()
+#logHandler.setFormatter(formatter)
 logger.addHandler(logHandler)
 
 # get host IP

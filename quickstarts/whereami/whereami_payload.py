@@ -40,8 +40,8 @@ GRPC_SECURE_PORTS = ['443', '8443'] # when using gRPC, this list is checked when
 logger = logging.getLogger()
 
 logHandler = logging.StreamHandler()
-formatter = jsonlogger.JsonFormatter()
-logHandler.setFormatter(formatter)
+#formatter = jsonlogger.JsonFormatter()
+#logHandler.setFormatter(formatter)
 logger.addHandler(logHandler)
 
 # set up emoji list
