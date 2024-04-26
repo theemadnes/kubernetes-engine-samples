@@ -37,6 +37,10 @@ spec:
         runAsGroup: 1000
         runAsNonRoot: true
         runAsUser: 1000
+      volumes:
+      - name: tmp
+        emptyDir: {}
+        medium: Memory
       containers:
       - name: whereami
         securityContext:
@@ -72,6 +76,9 @@ spec:
             scheme: HTTP
           initialDelaySeconds: 10
           timeoutSeconds: 1
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         env:
           - name: NODE_NAME
             valueFrom:
