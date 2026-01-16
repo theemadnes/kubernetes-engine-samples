@@ -4,13 +4,13 @@
 
 `whereami` is a simple Kubernetes-oriented python app for describing the location of the pod serving a request via its attributes (cluster name, cluster region, pod name, namespace, service account, etc). This is useful for a variety of demos where you just need to understand how traffic is getting to and returning from your app.
 
-`whereami`, by default, is a Flask-based python app. It also can operate as a [gRPC](https://grpc.io/) server. The instructions for using gRPC are at the bottom of this document [here](#gRPC-support).
+`whereami`, by default, is a FastAPI-based python app. It also can operate as a [gRPC](https://grpc.io/) server. The instructions for using gRPC are at the bottom of this document [here](#gRPC-support).
 
 ### Observability
 
-Tracing to `whereami` is instrumented via [OpenTelemetry](https://cloud.google.com/trace/docs/setup/python-ot) when in default Flask mode, and will export traces to Cloud Trace when run on GCP. The `TRACE_SAMPLING_RATIO` value in the ConfigMap can be used to configure sampling likelihood.
+Tracing to `whereami` is instrumented via [OpenTelemetry](https://cloud.google.com/trace/docs/setup/python-ot) when in default FastAPI mode, and will export traces to Cloud Trace when run on GCP. The `TRACE_SAMPLING_RATIO` value in the ConfigMap can be used to configure sampling likelihood.
 
-Prometheus metrics are exposed from `whereami` at `x.x.x.x/metrics` in both Flask and gRPC modes. In gRPC mode, the `metrics` endpoint is exposed on port `8000` via `HTTP`.
+Prometheus metrics are exposed from `whereami` at `x.x.x.x/metrics` in both FastAPI and gRPC modes. In gRPC mode, the `metrics` endpoint is exposed on port `8000` via `HTTP`.
 
 > Note: when running the `whereami` pod(s) with [Workload Identity](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity) enabled, make sure that the associated GSA has a role attached to it with permissions to write to Cloud Trace, such as `roles/cloudtrace.agent`
 
@@ -410,7 +410,7 @@ $ curl $ENDPOINT -s | jq .
 
 ### gRPC support
 
-All of the prior examples for `whereami` are based on its default operating mode of using [Flask](https://flask.palletsprojects.com/en/1.1.x/) as its server. The following section details how `whereami` can be configured to use [gRPC](https://grpc.io/) instead.
+All of the prior examples for `whereami` are based on its default operating mode of using [FastAPI](https://fastapi.tiangolo.com) as its server. The following section details how `whereami` can be configured to use [gRPC](https://grpc.io/) instead.
 
 By setting the feature flag `GRPC_ENABLED` in the `whereami` configmap (see [here](k8s-grpc/configmap.yaml)) to `"True"`, `whereami` can be interacted with using [gRPC](https://grpc.io/), with support for the gRPC [health check protocol](https://github.com/grpc/grpc/blob/master/doc/health-checking.md). The examples below leverage [grpcurl](https://github.com/fullstorydev/grpcurl), and assume you've already deployed a GKE cluster.
 

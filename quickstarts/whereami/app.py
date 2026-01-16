@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from flask import Flask, request, Response, jsonify
+from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 import logging
 from logging.config import dictConfig
 import sys
 import os
-from flask_cors import CORS
+import asyncio
+from hypercorn.config import Config
+from hypercorn.asyncio import serve
 import whereami_payload
 # gRPC stuff
 from concurrent import futures
@@ -31,14 +34,14 @@ from grpc_health.v1 import health_pb2_grpc
 import whereami_pb2
 import whereami_pb2_grpc
 # Prometheus export setup
-from prometheus_flask_exporter import PrometheusMetrics
+from prometheus_fastapi_instrumentator import Instrumentator
 from py_grpc_prometheus.prometheus_server_interceptor import PromServerInterceptor
 from prometheus_client import start_http_server
 # OpenTelemetry setup
-os.environ["OTEL_PYTHON_FLASK_EXCLUDED_URLS"] = "healthz,metrics"  # set exclusions
-from opentelemetry.instrumentation.requests import RequestsInstrumentor
+os.environ["OTEL_PYTHON_FASTAPI_EXCLUDED_URLS"] = "healthz,metrics"  # set exclusions
+#from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from opentelemetry import trace
-from opentelemetry.instrumentation.flask import FlaskInstrumentor
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
 from opentelemetry.propagate import set_global_textmap
 from opentelemetry.sdk.trace import TracerProvider
@@ -51,18 +54,36 @@ from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
 # set up logging
 dictConfig({
     'version': 1,
+    'disable_existing_loggers': False,
     'formatters': {'default': {
         'format': '[%(asctime)s] %(levelname)s in %(module)s: %(message)s',
     }},
-    'handlers': {'wsgi': {
+    'handlers': {'agsi': {
         'class': 'logging.StreamHandler',
         'stream': 'ext://sys.stdout',
         'formatter': 'default'
     }},
     'root': {
         'level': 'INFO',
-        'handlers': ['wsgi']
-    }
+        'handlers': ['agsi']
+    },
+    'loggers': {
+        'hypercorn': {
+            'handlers': [],
+            'level': 'INFO',
+            'propagate': True,
+        },
+        'hypercorn.error': {
+            'handlers': [],
+            'level': 'INFO',
+            'propagate': True,
+        },
+        'hypercorn.access': {
+            'handlers': ['agsi'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
 })
 
 # get host IP
@@ -102,17 +123,21 @@ if trace_sampling_ratio > 0:
 else:
     logging.info("Tracing disabled.")
 
-# flask setup
-app = Flask(__name__)
-handler = logging.StreamHandler(sys.stdout)
-app.logger.addHandler(handler)
-#app.logger.propagate = True
-app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
-FlaskInstrumentor().instrument_app(app)
-RequestsInstrumentor().instrument()  # enable tracing for Requests
-app.config['JSON_AS_ASCII'] = False  # otherwise our emojis get hosed
-CORS(app)  # enable CORS
-metrics = PrometheusMetrics(app)  # enable Prom metrics
+# FastAPI setup
+app = FastAPI()
+FastAPIInstrumentor().instrument_app(app)
+#RequestsInstrumentor().instrument()  # enable tracing for Requests
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# Add Prometheus middleware
+Instrumentator(excluded_handlers=["/healthz"]).instrument(app).expose(app)
+
 
 # gRPC setup
 grpc_serving_port = int(os.environ.get('PORT', 9090)) # configurable via `PORT` but default to 9090
@@ -174,37 +199,39 @@ def grpc_serve():
 
 
 # HTTP heathcheck
-@app.route('/healthz')  # healthcheck endpoint
-@metrics.do_not_track()  # exclude from prom metrics
-def i_am_healthy():
-    return ('OK')
+@app.get('/healthz')  # healthcheck endpoint
+async def health_check():
+    return {"status": "ok"}
 
 
 # default HTTP service
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def home(path):
+@app.get("/")
+@app.get("/{path:path}")
+async def home(request: Request, path: str = None):
 
-    payload = whereami_payload.build_payload(request.headers)
+    payload = await whereami_payload.build_payload(request.headers)
 
     # split the path to see if user wants to read a specific field
-    requested_value = path.split('/')[-1]
-    if requested_value in payload.keys():
+    if path:
+        requested_value = path.split('/')[-1]
+        if requested_value in payload.keys():
+            return Response(str(payload[requested_value]))
 
-        return payload[requested_value]
+    return payload
 
-    return jsonify(payload)
-
-if __name__ == '__main__':
-
+async def main():
     # decision point - HTTP or gRPC?
     if os.getenv('GRPC_ENABLED') == "True":
         logging.info('gRPC server listening on port %s'%(grpc_serving_port))
         grpc_serve()
 
     else:
-        app.run(
-            host=host_ip.strip('[]'), # stripping out the brackets if present
-            port=int(os.environ.get('PORT', 8080)),
-            #debug=True,
-            threaded=True)
+        config = Config()
+        config.bind = [f"{host_ip.strip('[]')}:{int(os.environ.get('PORT', 8080))}"]
+        #config.workers = (multiprocessing.cpu_count() * 2) + 1
+        config.worker_class = "asyncio"
+        config.log_config = None
+        await serve(app, config)
+
+if __name__ == '__main__':
+    asyncio.run(main())

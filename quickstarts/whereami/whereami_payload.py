@@ -5,10 +5,7 @@ from datetime import datetime
 import emoji
 import logging
 from logging.config import dictConfig
-import requests
-from requests.adapters import HTTPAdapter
-import urllib3
-from urllib3 import Retry
+import httpx
 # gRPC stuff
 import grpc
 from six import b
@@ -22,18 +19,36 @@ GRPC_SECURE_PORTS = ['443', '8443'] # when using gRPC, this list is checked when
 # set up logging
 dictConfig({
     'version': 1,
+    'disable_existing_loggers': False,
     'formatters': {'default': {
         'format': '[%(asctime)s] %(levelname)s in %(module)s: %(message)s',
     }},
-    'handlers': {'wsgi': {
+    'handlers': {'agsi': {
         'class': 'logging.StreamHandler',
         'stream': 'ext://sys.stdout',
         'formatter': 'default'
     }},
     'root': {
         'level': 'INFO',
-        'handlers': ['wsgi']
-    }
+        'handlers': ['agsi']
+    },
+    'loggers': {
+        'hypercorn': {
+            'handlers': [],
+            'level': 'INFO',
+            'propagate': True,
+        },
+        'hypercorn.error': {
+            'handlers': [],
+            'level': 'INFO',
+            'propagate': True,
+        },
+        'hypercorn.access': {
+            'handlers': ['agsi'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
 })
 
 # set up emoji list
@@ -50,25 +65,25 @@ class WhereamiPayload(object):
         # configure retries for GCE metadata GET
         # we're doing this because, on GKE, metadata endpoint can take a few seconds to be available
         # see https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity#limitations
-
-        # everything else
-        session = requests.Session()
-        adapter = HTTPAdapter(max_retries=Retry(connect=3, read=3, other=3, total=3, backoff_factor=5)) #, status_forcelist=[429, 500, 502, 503, 504]))
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
+        transport = httpx.HTTPTransport(retries=3)
 
         try:
             # grab info from GCE metadata
-            r = session.get(METADATA_URL + '?recursive=true',
-                                headers=METADATA_HEADERS)
-            if r.ok:
-                logging.info("Successfully accessed GCE metadata endpoint.")
-                self.gce_metadata = r.json()
-        except:
-            logging.warning("Unable to access GCE metadata endpoint.")
+            with httpx.Client(transport=transport) as client:
+                r = client.get(METADATA_URL + '?recursive=true',
+                                   headers=METADATA_HEADERS)
+                if r.status_code == 200:
+                    logging.info("Successfully accessed GCE metadata endpoint.")
+                    self.gce_metadata = r.json()
+                else:
+                    logging.warning(f"Unable to access GCE metadata endpoint. Status code: {r.status_code}")
+        except httpx.RequestError as exc:
+            logging.warning(f"Unable to access GCE metadata endpoint: {exc}")
+        except Exception as exc:
+            logging.warning(f"An unexpected error occurred while fetching GCE metadata: {exc}")
 
 
-    def build_payload(self, request_headers):
+    async def build_payload(self, request_headers):
 
         # header propagation for HTTP calls to downward services
         # for Istio / Anthos Service Mesh
@@ -94,12 +109,13 @@ class WhereamiPayload(object):
             return headers
 
         # call HTTP backend (expect JSON reesponse)
-        def call_http_backend(backend_service):
+        async def call_http_backend(backend_service):
 
             try:
-                r = requests.get(backend_service,
-                                 headers=getForwardHeaders(request_headers))
-                if r.ok:
+                async with httpx.AsyncClient() as client:
+                    r = await client.get(backend_service,
+                                     headers=getForwardHeaders(request_headers))
+                if r.status_code == 200:
                     backend_result = r.json()
                 else:
                     backend_result = None
@@ -215,7 +231,7 @@ class WhereamiPayload(object):
 
             else:
 
-                self.payload['backend_result'] = call_http_backend(backend_service)
+                self.payload['backend_result'] = await call_http_backend(backend_service)
 
         echo_headers = os.getenv('ECHO_HEADERS')
 
