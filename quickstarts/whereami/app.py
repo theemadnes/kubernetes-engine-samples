@@ -142,8 +142,9 @@ class RequestLoggingInterceptor(grpc.ServerInterceptor):
             return handler
 
         def logging_wrapper(request, context):
-            self._logger.info(
-                f"gRPC request received: Method='{handler_call_details.method}', Peer='{context.peer()}'")
+            if handler_call_details.method != f'/{health.SERVICE_NAME}/Check':
+                self._logger.info(
+                    f"gRPC request received: Method='{handler_call_details.method}', Peer='{context.peer()}'")
             return handler.unary_unary(request, context)
 
         return grpc.unary_unary_rpc_method_handler(
