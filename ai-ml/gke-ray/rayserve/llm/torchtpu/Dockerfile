@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # [START gke_ai_ml_gke_ray_rayserve_llm_torchtpu_dockerfile]
-FROM us-docker.pkg.dev/ml-oss-artifacts-transient/torch-tpu-docker-container/torchtpu-vllm-prod:latest
+FROM vllm/vllm-torchtpu:v0.29.0
 
 # Install wget for KubeRay health probes and Ray Serve on top of the prebuilt vLLM-TorchTPU image
 RUN apt-get update && apt-get install -y --no-install-recommends wget \
