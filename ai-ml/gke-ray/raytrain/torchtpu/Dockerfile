@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # [START gke_ai_ml_gke_ray_raytrain_torchtpu_dockerfile]
-FROM us-docker.pkg.dev/ml-oss-artifacts-transient/torch-tpu-docker-container/torch-tpu:nightly
+FROM us-docker.pkg.dev/ml-oss-artifacts-published/torch-tpu-public-release-container/torch-tpu:latest
 
 # Install wget for KubeRay health probes, Ray (Core, Dashboard, and Train), and Hugging Face libraries for fine-tuning
 RUN apt-get update && apt-get install -y --no-install-recommends wget \
