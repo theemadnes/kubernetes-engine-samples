@@ -20,7 +20,6 @@ import os
 import json
 import time
 import threading
-import collections
 from flask_cors import CORS
 import whereami_payload
 # gRPC stuff
@@ -207,217 +206,267 @@ def i_am_healthy():
     return ('OK')
 
 
-# ORCA custom metrics tracking
-_last_cgroup_cpu = None
-_last_cgroup_timestamp = 0.0
-_last_cpu_times = None
-_last_cpu_utilization = 0.0
-_orca_lock = threading.Lock()
-_request_timestamps = collections.deque()
-_error_timestamps = collections.deque()
-_RATE_WINDOW_SECONDS = 10.0
-_MIN_SAMPLE_INTERVAL = 1.0  # minimum seconds between CPU measurements
+# ORCA custom metrics tracking (optimized: static cgroup discovery, decoupled background sampling, sliding window rates)
+class SlidingRateTracker:
+    """Calculates rps_fractional and eps using a fixed-size 10-second sliding bucket ring buffer."""
+    def __init__(self, window_seconds=10):
+        self.window_seconds = int(window_seconds)
+        self.buckets = [[0, 0, 0] for _ in range(self.window_seconds)]
+        self.lock = threading.Lock()
 
-
-def _get_cgroup_dir():
-    """Finds the cgroup directory for the current process."""
-    try:
-        with open('/proc/self/cgroup', 'r') as f:
-            for line in f:
-                parts = line.strip().split(':')
-                if len(parts) == 3:
-                    cgroup_path = parts[2].lstrip('/')
-                    p = os.path.join('/sys/fs/cgroup', cgroup_path)
-                    if os.path.exists(p):
-                        return p
-    except Exception:
-        pass
-    return '/sys/fs/cgroup'
-
-
-def _read_cgroup_cpu():
-    """Reads container CPU usage in seconds and quota in cores from cgroups."""
-    cdir = _get_cgroup_dir()
-    # cgroup v2
-    cpu_stat = os.path.join(cdir, 'cpu.stat')
-    if os.path.exists(cpu_stat):
-        usage_usec = None
-        with open(cpu_stat, 'r') as f:
-            for line in f:
-                if line.startswith('usage_usec'):
-                    usage_usec = float(line.split()[1])
-                    break
-        quota_cpus = None
-        cpu_max = os.path.join(cdir, 'cpu.max')
-        if os.path.exists(cpu_max):
-            with open(cpu_max, 'r') as f:
-                parts = f.read().strip().split()
-                if len(parts) == 2 and parts[0] != 'max':
-                    quota_cpus = float(parts[0]) / float(parts[1])
-        if quota_cpus is None:
-            quota_cpus = float(os.cpu_count() or 1)
-        if usage_usec is not None:
-            return usage_usec / 1e6, quota_cpus
-
-    # cgroup v1
-    v1_usage = os.path.join(cdir, 'cpuacct.usage')
-    if not os.path.exists(v1_usage):
-        v1_usage = '/sys/fs/cgroup/cpuacct/cpuacct.usage'
-    if os.path.exists(v1_usage):
-        with open(v1_usage, 'r') as f:
-            usage_sec = float(f.read().strip()) / 1e9
-        quota_cpus = None
-        v1_quota = os.path.join(cdir, 'cpu.cfs_quota_us')
-        v1_period = os.path.join(cdir, 'cpu.cfs_period_us')
-        if os.path.exists(v1_quota) and os.path.exists(v1_period):
-            with open(v1_quota, 'r') as fq, open(v1_period, 'r') as fp:
-                q = float(fq.read().strip())
-                p = float(fp.read().strip())
-                if q > 0 and p > 0:
-                    quota_cpus = q / p
-        if quota_cpus is None:
-            quota_cpus = float(os.cpu_count() or 1)
-        return usage_sec, quota_cpus
-
-    return None, None
-
-
-def _read_cpu_times():
-    """Reads /proc/stat to get total and idle CPU times."""
-    try:
-        with open('/proc/stat', 'r') as f:
-            fields = [float(x) for x in f.readline().strip().split()[1:]]
-            idle = fields[3] + (fields[4] if len(fields) > 4 else 0.0)
-            total = sum(fields)
-            return total, idle
-    except Exception:
-        return None, None
-
-
-def get_cpu_utilization():
-    """Captures CPU utilization using cgroup stats scaled by container CPU limit."""
-    global _last_cgroup_cpu, _last_cgroup_timestamp, _last_cpu_times, _last_cpu_utilization
-    now = time.time()
-    with _orca_lock:
-        usage_sec, quota_cpus = _read_cgroup_cpu()
-        if usage_sec is not None and quota_cpus is not None:
-            if _last_cgroup_cpu is not None:
-                prev_usage, _ = _last_cgroup_cpu
-                elapsed_time = now - _last_cgroup_timestamp
-                # Only recompute if minimum interval elapsed to avoid microsecond quantization
-                if elapsed_time >= _MIN_SAMPLE_INTERVAL:
-                    delta_usage = usage_sec - prev_usage
-                    if delta_usage >= 0 and elapsed_time > 0 and quota_cpus > 0:
-                        _last_cpu_utilization = max(0.0, delta_usage / (elapsed_time * quota_cpus))
-                    _last_cgroup_cpu = (usage_sec, quota_cpus)
-                    _last_cgroup_timestamp = now
+    def record_and_get_rates(self, is_error=False):
+        now = time.time()
+        current_sec = int(now)
+        idx = current_sec % self.window_seconds
+        with self.lock:
+            bucket = self.buckets[idx]
+            if bucket[0] == current_sec:
+                bucket[1] += 1
+                if is_error:
+                    bucket[2] += 1
             else:
-                _last_cgroup_cpu = (usage_sec, quota_cpus)
-                _last_cgroup_timestamp = now
-            return round(_last_cpu_utilization, 4)
+                bucket[0] = current_sec
+                bucket[1] = 1
+                bucket[2] = 1 if is_error else 0
+
+            min_sec = current_sec - self.window_seconds
+            total_reqs = 0
+            total_errs = 0
+            for sec, reqs, errs in self.buckets:
+                if min_sec < sec <= current_sec:
+                    total_reqs += reqs
+                    total_errs += errs
+
+        return round(total_reqs / self.window_seconds, 4), round(total_errs / self.window_seconds, 4)
+
+
+class OrcaMetricsTracker:
+    """Manages container metrics polling decoupled from the HTTP request path."""
+    def __init__(self):
+        self.rate_tracker = SlidingRateTracker(10)
+        self.cpu_utilization = 0.0
+        self.mem_utilization = 0.0
+        self.lock = threading.Lock()
+        self._thread = None
+        self._started = False
+
+        self._cgroup_mode = None
+        self._cpu_usage_path = None
+        self._cpu_quota_cpus = float(os.cpu_count() or 1)
+        self._mem_usage_path = None
+        self._mem_limit_bytes = None
+
+        self._last_cpu_usage = None
+        self._last_cpu_timestamp = 0.0
+        self._last_proc_cpu = None
+
+        self._discover_cgroups()
+        self._sample()
+
+    def _discover_cgroups(self):
+        cdir = None
+        try:
+            with open('/proc/self/cgroup', 'r') as f:
+                for line in f:
+                    parts = line.strip().split(':')
+                    if len(parts) == 3:
+                        p = os.path.join('/sys/fs/cgroup', parts[2].lstrip('/'))
+                        if os.path.exists(p):
+                            cdir = p
+                            break
+        except Exception:
+            pass
+        if not cdir or not os.path.exists(cdir):
+            cdir = '/sys/fs/cgroup'
+
+        # Check cgroup v2
+        v2_cpu_stat = os.path.join(cdir, 'cpu.stat')
+        if os.path.exists(v2_cpu_stat):
+            self._cgroup_mode = 'v2'
+            self._cpu_usage_path = v2_cpu_stat
+            cpu_max = os.path.join(cdir, 'cpu.max')
+            if os.path.exists(cpu_max):
+                try:
+                    with open(cpu_max, 'r') as f:
+                        parts = f.read().strip().split()
+                        if len(parts) == 2 and parts[0] != 'max':
+                            q, p = float(parts[0]), float(parts[1])
+                            if q > 0 and p > 0:
+                                self._cpu_quota_cpus = q / p
+                except Exception:
+                    pass
+
+            v2_mem_curr = os.path.join(cdir, 'memory.current')
+            if os.path.exists(v2_mem_curr):
+                self._mem_usage_path = v2_mem_curr
+                v2_mem_max = os.path.join(cdir, 'memory.max')
+                if os.path.exists(v2_mem_max):
+                    try:
+                        with open(v2_mem_max, 'r') as f:
+                            m_str = f.read().strip()
+                            if m_str != 'max':
+                                m_val = float(m_str)
+                                if m_val > 0:
+                                    self._mem_limit_bytes = m_val
+                    except Exception:
+                        pass
+            return
+
+        # Check cgroup v1
+        v1_cpuacct = os.path.join(cdir, 'cpuacct.usage')
+        if not os.path.exists(v1_cpuacct):
+            v1_cpuacct = '/sys/fs/cgroup/cpuacct/cpuacct.usage'
+        if os.path.exists(v1_cpuacct):
+            self._cgroup_mode = 'v1'
+            self._cpu_usage_path = v1_cpuacct
+            v1_quota = os.path.join(cdir, 'cpu.cfs_quota_us')
+            v1_period = os.path.join(cdir, 'cpu.cfs_period_us')
+            if os.path.exists(v1_quota) and os.path.exists(v1_period):
+                try:
+                    with open(v1_quota, 'r') as fq, open(v1_period, 'r') as fp:
+                        q = float(fq.read().strip())
+                        p = float(fp.read().strip())
+                        if q > 0 and p > 0:
+                            self._cpu_quota_cpus = q / p
+                except Exception:
+                    pass
+
+            v1_mem_usage = os.path.join(cdir, 'memory.usage_in_bytes')
+            if not os.path.exists(v1_mem_usage):
+                v1_mem_usage = '/sys/fs/cgroup/memory/memory.usage_in_bytes'
+            if os.path.exists(v1_mem_usage):
+                self._mem_usage_path = v1_mem_usage
+                v1_mem_limit = os.path.join(cdir, 'memory.limit_in_bytes')
+                if not os.path.exists(v1_mem_limit):
+                    v1_mem_limit = '/sys/fs/cgroup/memory/memory.limit_in_bytes'
+                if os.path.exists(v1_mem_limit):
+                    try:
+                        with open(v1_mem_limit, 'r') as f:
+                            lim = float(f.read().strip())
+                            if 0 < lim < (1 << 60):
+                                self._mem_limit_bytes = lim
+                    except Exception:
+                        pass
+            return
+
+        # Fallback to host procfs
+        self._cgroup_mode = 'proc'
+
+    def _read_cpu_usage(self):
+        if self._cgroup_mode == 'v2' and self._cpu_usage_path:
+            try:
+                with open(self._cpu_usage_path, 'r') as f:
+                    for line in f:
+                        if line.startswith('usage_usec'):
+                            return float(line.split()[1]) / 1e6
+            except Exception:
+                pass
+        elif self._cgroup_mode == 'v1' and self._cpu_usage_path:
+            try:
+                with open(self._cpu_usage_path, 'r') as f:
+                    return float(f.read().strip()) / 1e9
+            except Exception:
+                pass
+        return None
+
+    def _read_mem_utilization(self):
+        if self._mem_usage_path and self._mem_limit_bytes:
+            try:
+                with open(self._mem_usage_path, 'r') as f:
+                    usage = float(f.read().strip())
+                    return max(0.0, min(1.0, usage / self._mem_limit_bytes))
+            except Exception:
+                pass
+
+        try:
+            with open('/proc/meminfo', 'r') as f:
+                meminfo = {}
+                for line in f:
+                    parts = line.split(':')
+                    if len(parts) == 2:
+                        meminfo[parts[0].strip()] = float(parts[1].split()[0])
+                total = meminfo.get('MemTotal', 1.0)
+                avail = meminfo.get('MemAvailable', meminfo.get('MemFree', 0.0))
+                return max(0.0, min(1.0, (total - avail) / total))
+        except Exception:
+            return 0.0
+
+    def _sample(self):
+        now = time.time()
+        usage_sec = self._read_cpu_usage()
+        if usage_sec is not None:
+            if self._last_cpu_usage is not None:
+                elapsed = now - self._last_cpu_timestamp
+                if elapsed > 0:
+                    delta_usage = usage_sec - self._last_cpu_usage
+                    if delta_usage >= 0 and self._cpu_quota_cpus > 0:
+                        self.cpu_utilization = round(max(0.0, delta_usage / (elapsed * self._cpu_quota_cpus)), 4)
+            self._last_cpu_usage = usage_sec
+            self._last_cpu_timestamp = now
         else:
-            # Fallback to /proc/stat or load average
-            total, idle = _read_cpu_times()
-            if total is not None and idle is not None:
-                if _last_cpu_times is not None:
-                    prev_total, prev_idle = _last_cpu_times
+            try:
+                with open('/proc/stat', 'r') as f:
+                    fields = [float(x) for x in f.readline().strip().split()[1:]]
+                    idle = fields[3] + (fields[4] if len(fields) > 4 else 0.0)
+                    total = sum(fields)
+                if self._last_proc_cpu is not None:
+                    prev_total, prev_idle = self._last_proc_cpu
                     delta_total = total - prev_total
                     delta_idle = idle - prev_idle
                     if delta_total > 0:
-                        _last_cpu_utilization = max(0.0, (delta_total - delta_idle) / delta_total)
-                _last_cpu_times = (total, idle)
-                return round(_last_cpu_utilization, 4)
-            else:
+                        self.cpu_utilization = round(max(0.0, (delta_total - delta_idle) / delta_total), 4)
+                self._last_proc_cpu = (total, idle)
+            except Exception:
                 try:
                     load1 = os.getloadavg()[0]
-                    cpu_count = os.cpu_count() or 1
-                    return round(max(0.0, min(1.0, load1 / cpu_count)), 4)
+                    self.cpu_utilization = round(max(0.0, min(1.0, load1 / self._cpu_quota_cpus)), 4)
                 except Exception:
-                    return 0.0
+                    self.cpu_utilization = 0.0
+
+        self.mem_utilization = round(self._read_mem_utilization(), 4)
+
+    def start_background_sampler(self):
+        with self.lock:
+            if self._started:
+                return
+            self._started = True
+
+            def _loop():
+                while True:
+                    time.sleep(1.0)
+                    try:
+                        self._sample()
+                    except Exception:
+                        pass
+
+            self._thread = threading.Thread(target=_loop, daemon=True)
+            self._thread.start()
+
+
+_orca_tracker = OrcaMetricsTracker()
+
+
+def get_cpu_utilization():
+    return _orca_tracker.cpu_utilization
 
 
 def get_memory_utilization():
-    """Captures memory utilization as a float between 0.0 and 1.0."""
-    cdir = _get_cgroup_dir()
-    # Check cgroup v2
-    try:
-        mem_curr = os.path.join(cdir, 'memory.current')
-        mem_max = os.path.join(cdir, 'memory.max')
-        if os.path.exists(mem_curr) and os.path.exists(mem_max):
-            with open(mem_curr, 'r') as f:
-                usage = float(f.read().strip())
-            with open(mem_max, 'r') as f:
-                max_str = f.read().strip()
-                if max_str != 'max':
-                    limit = float(max_str)
-                    if limit > 0:
-                        return round(max(0.0, min(1.0, usage / limit)), 4)
-    except Exception:
-        pass
-
-    # Check cgroup v1
-    try:
-        mem_usage = os.path.join(cdir, 'memory.usage_in_bytes')
-        mem_limit = os.path.join(cdir, 'memory.limit_in_bytes')
-        if not os.path.exists(mem_usage):
-            mem_usage = '/sys/fs/cgroup/memory/memory.usage_in_bytes'
-            mem_limit = '/sys/fs/cgroup/memory/memory.limit_in_bytes'
-        if os.path.exists(mem_usage) and os.path.exists(mem_limit):
-            with open(mem_usage, 'r') as f:
-                usage = float(f.read().strip())
-            with open(mem_limit, 'r') as f:
-                limit = float(f.read().strip())
-                if 0 < limit < (1 << 60):
-                    return round(max(0.0, min(1.0, usage / limit)), 4)
-    except Exception:
-        pass
-
-    # Fallback to /proc/meminfo
-    try:
-        with open('/proc/meminfo', 'r') as f:
-            meminfo = {}
-            for line in f:
-                parts = line.split(':')
-                if len(parts) == 2:
-                    meminfo[parts[0].strip()] = float(parts[1].split()[0])
-            total = meminfo.get('MemTotal', 1.0)
-            avail = meminfo.get('MemAvailable', meminfo.get('MemFree', 0.0))
-            return round(max(0.0, min(1.0, (total - avail) / total)), 4)
-    except Exception:
-        return 0.0
+    return _orca_tracker.mem_utilization
 
 
 def _record_request_and_get_rates(is_error=False):
-    """Calculates rps_fractional and eps over a sliding time window."""
-    now = time.time()
-    with _orca_lock:
-        _request_timestamps.append(now)
-        if is_error:
-            _error_timestamps.append(now)
-
-        cutoff = now - _RATE_WINDOW_SECONDS
-        while _request_timestamps and _request_timestamps[0] < cutoff:
-            _request_timestamps.popleft()
-        while _error_timestamps and _error_timestamps[0] < cutoff:
-            _error_timestamps.popleft()
-
-        rps = round(len(_request_timestamps) / _RATE_WINDOW_SECONDS, 4)
-        eps = round(len(_error_timestamps) / _RATE_WINDOW_SECONDS, 4)
-        return rps, eps
+    return _orca_tracker.rate_tracker.record_and_get_rates(is_error=is_error)
 
 
-# Initialize CPU baseline measurement
-_init_cgroup = _read_cgroup_cpu()
-if _init_cgroup[0] is not None:
-    _last_cgroup_cpu = _init_cgroup
-    _last_cgroup_timestamp = time.time()
-else:
-    _last_cpu_times = _read_cpu_times()
+# Automatically start background sampler if enabled at process launch
+if os.getenv('ENABLE_ORCA_HEADERS') == 'True':
+    _orca_tracker.start_background_sampler()
 
 
 @app.after_request
 def add_orca_headers(response):
     if os.getenv('ENABLE_ORCA_HEADERS') == 'True':
+        _orca_tracker.start_background_sampler()
         is_error = response.status_code >= 500
         rps, eps = _record_request_and_get_rates(is_error=is_error)
         cpu_util = get_cpu_utilization()
